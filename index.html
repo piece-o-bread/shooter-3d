@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>mc</title>
+  <style>
+    body { margin:0; overflow:hidden; }
+    canvas { display:block; }
+   #crosshair {
+  position: absolute;
+  top: 50%; left: 50%;
+  width: 20px; height: 20px;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+#crosshair:before,
+#crosshair:after {
+  content: "";
+  position: absolute;
+  left: 50%; top: 50%;
+  background: white;
+  transform: translate(-50%, -50%);
+}
+
+#crosshair:before { width: 2px; height: 14px; }
+#crosshair:after  { width: 14px; height: 2px; }
+  </style>
+</head>
+<body>
+<div id="crosshair"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+<script>
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x87cefa);
+
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+const renderer = new THREE.WebGLRenderer();
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+//// LIGHT
+const sun = new THREE.DirectionalLight(0xffffff,1);
+sun.position.set(20,40,20);
+scene.add(sun);
+scene.add(new THREE.AmbientLight(0xffffff,0.8));
+
+//// TEXTURES
+const loader = new THREE.TextureLoader();
+
+const grassSideTex = loader.load("https://i.imgur.com/iAN1pgF.png");
+grassSideTex.magFilter = THREE.NearestFilter;
+grassSideTex.minFilter = THREE.NearestFilter;
+grassSideTex.generateMipmaps = false;
+
+const grassTopTex = loader.load("https://i.imgur.com/iAN1pgF.png");
+grassTopTex.magFilter = THREE.NearestFilter;
+grassTopTex.minFilter = THREE.NearestFilter;
+grassTopTex.generateMipmaps = false;
+
+const stoneTex = loader.load("https://i.imgur.com/SBtEslT.png");
+stoneTex.magFilter = THREE.NearestFilter;
+stoneTex.minFilter = THREE.NearestFilter;
+stoneTex.generateMipmaps = false;
+
+const bedrockTex = loader.load("https://i.imgur.com/YUZvf4U.png");
+bedrockTex.magFilter = THREE.NearestFilter;
+bedrockTex.minFilter = THREE.NearestFilter;
+bedrockTex.generateMipmaps = false;
+
+const woodTex = loader.load("https://i.imgur.com/04GOfFr.png");
+woodTex.magFilter = THREE.NearestFilter;
+woodTex.minFilter = THREE.NearestFilter;
+woodTex.generateMipmaps = false;
+
+// placeholder block for right-click
+const placeholderTex = woodTex;
+const placedBlockMat = new THREE.MeshLambertMaterial({ map: woodTex });
+const grassSideMat = new THREE.MeshLambertMaterial({ map: grassSideTex });
+const grassTopMat = new THREE.MeshLambertMaterial({ map: grassTopTex });
+const stoneMat = new THREE.MeshLambertMaterial({ map: stoneTex });
+const bedrockMat = new THREE.MeshLambertMaterial({ map: bedrockTex });
+
+//// PLAYER
+const playerHeight = 1.7;
+const playerGeo = new THREE.BoxGeometry(0.5, playerHeight, 0.5);
+const playerMat = new THREE.MeshBasicMaterial({ visible:false });
+const player = new THREE.Mesh(playerGeo, playerMat);
+player.position.set(0,5,0);
+scene.add(player);
+
+const cameraPivot = new THREE.Object3D();
+cameraPivot.position.y = 0.5;
+player.add(cameraPivot);
+cameraPivot.add(camera);
+
+//// WORLD STORAGE
+const world = {};
+const blocks = [];
+function key(x,y,z){ return `${x},${y},${z}`; }
+
+function addBlock(x,y,z,mat){
+  if(world[key(x,y,z)]) return;
+  const mesh = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), mat);
+  mesh.position.set(x,y,z);
+  scene.add(mesh);
+  world[key(x,y,z)] = mesh;
+  blocks.push(mesh);
+}
+
+function removeBlock(mesh){
+  const k = key(mesh.position.x, mesh.position.y, mesh.position.z);
+  if(world[k] && world[k].material === bedrockMat) return;
+  scene.remove(mesh);
+  delete world[k];
+  const i = blocks.indexOf(mesh);
+  if(i > -1) blocks.splice(i,1);
+}
+
+//// GENERATE WORLD
+const worldWidth = 10;
+const worldDepth = 10;
+const worldHeight = 20;
+
+for(let x=-worldWidth;x<worldWidth;x++){
+  for(let z=-worldDepth;z<worldDepth;z++){
+    for(let y=0;y<worldHeight;y++){
+      if(y===0) addBlock(x,y,z,bedrockMat);
+      else if(y===worldHeight-1) addBlock(x,y,z,grassTopMat);
+      else addBlock(x,y,z,stoneMat);
+    }
+  }
+}
+
+//// HIGHLIGHT
+const highlightMat = new THREE.MeshBasicMaterial({ color:0xffff00, wireframe:true });
+const highlightBox = new THREE.Mesh(new THREE.BoxGeometry(1.02,1.02,1.02), highlightMat);
+highlightBox.visible = false;
+scene.add(highlightBox);
+
+//// CONTROLS
+const keys = {};
+let velocityY = 0;
+const gravity = -0.027; let onGround = false; let yaw = 0; let pitch = 0; const baseSpeed = 0.07*4.4; const sprintMult = 2.5;
+
+window.addEventListener('keydown', e=>keys[e.key]=true);
+window.addEventListener('keyup', e=>keys[e.key]=false);
+document.body.addEventListener('click',()=>document.body.requestPointerLock());
+document.addEventListener('mousemove', e=>{
+  if(document.pointerLockElement === document.body){
+    yaw -= e.movementX*0.002;
+    pitch -= e.movementY*0.002;
+    pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2,pitch));
+  }
+});
+
+//// COLLISION
+function intersectsWorld(testBox){
+  for(const k in world){
+    const block = world[k];
+    const blockBox = new THREE.Box3().setFromObject(block);
+    if(testBox.intersectsBox(blockBox)) return true;
+  }
+  return false;
+}
+
+//// BUILD/BREAK
+window.addEventListener('mousedown', e=>{
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera({x:0,y:0},camera);
+  const hits = ray.intersectObjects(blocks);
+  if(!hits.length) return;
+  const hit = hits[0];
+
+  if(e.button===0){
+    removeBlock(hit.object);
+  }
+  else if(e.button === 2){
+    // FIXED RIGHT-CLICK PLACEMENT: snap exactly next to face, no gap
+    const hitFace = hit.face.normal;
+    const hitPos = hit.point.clone();
+
+    const pos = new THREE.Vector3(
+      Math.floor(hitPos.x + hitFace.x*0.5 + 0.5),
+      Math.floor(hitPos.y + hitFace.y*0.5 + 0.5),
+      Math.floor(hitPos.z + hitFace.z*0.5 + 0.5)
+    );
+
+    const testBlock = new THREE.Mesh(new THREE.BoxGeometry(1,1,1));
+    testBlock.position.copy(pos);
+    const testBox = new THREE.Box3().setFromObject(testBlock);
+    const playerBox = new THREE.Box3().setFromObject(player);
+
+    if(!testBox.intersectsBox(playerBox)){
+      addBlock(pos.x, pos.y, pos.z, placedBlockMat);
+    }
+  }
+});
+window.addEventListener('contextmenu', e=>e.preventDefault());
+
+//// GAME LOOP
+function animate(){
+  requestAnimationFrame(animate);
+
+  const moveSpeed = keys["Shift"] ? baseSpeed*sprintMult : baseSpeed;
+  let dx=0,dz=0;
+  if(keys["ArrowUp"]) { dx -= Math.sin(yaw)*moveSpeed; dz -= Math.cos(yaw)*moveSpeed; }
+  if(keys["ArrowDown"]) { dx += Math.sin(yaw)*moveSpeed; dz += Math.cos(yaw)*moveSpeed; }
+  if(keys["ArrowLeft"]) { dx -= Math.cos(yaw)*moveSpeed; dz += Math.sin(yaw)*moveSpeed; }
+  if(keys["ArrowRight"]) { dx += Math.cos(yaw)*moveSpeed; dz -= Math.sin(yaw)*moveSpeed; }
+
+  const testPlayer = player.clone();
+  testPlayer.position.x += dx;
+  testPlayer.position.z += dz;
+  if(!intersectsWorld(new THREE.Box3().setFromObject(testPlayer))){
+    player.position.x += dx;
+    player.position.z += dz;
+  }
+
+  if(keys[" "] && onGround){
+    velocityY = 0.28; // stronger/faster jump :D
+    onGround = false;
+}
+  velocityY += gravity;
+  player.position.y += velocityY;
+
+  const playerBox = new THREE.Box3().setFromObject(player);
+  if(intersectsWorld(playerBox)){
+    while(intersectsWorld(playerBox)){
+      player.position.y -= Math.sign(velocityY)*0.01;
+      playerBox.setFromObject(player);
+    }
+    velocityY = 0;
+    onGround = velocityY <= 0;
+  } else onGround = false;
+
+  player.rotation.y = yaw;
+  cameraPivot.rotation.x = pitch;
+
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera({x:0,y:0},camera);
+  const hits = ray.intersectObjects(blocks);
+  if(hits.length){
+    highlightBox.position.copy(hits[0].object.position);
+    highlightBox.visible = true;
+  } else highlightBox.visible = false;
+
+  renderer.render(scene,camera);
+}
+animate();
+
+window.addEventListener("resize", ()=>{
+  camera.aspect = window.innerWidth/window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+</body>
+</html>
